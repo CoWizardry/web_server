@@ -11,6 +11,7 @@
 #include <process.h>
 #include <conio.h>
 #include <time.h>
+#include "cache.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -49,6 +50,20 @@ void removeQueryString(char *filePath) {
 }
 
 void send_file(SOCKET client_socket, const wchar_t *path) {
+    cache_entry_t *cached_entry = find_in_cache(path);
+    if (cached_entry != NULL) {
+        char buffer[BUFFER_SIZE];
+        snprintf(buffer, sizeof(buffer),
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Length: %zu\r\n"
+                 "Connection: close\r\n"
+                 "\r\n", cached_entry->size);
+        send(client_socket, buffer, strlen(buffer), 0);
+        send(client_socket, cached_entry->content, cached_entry->size, 0);
+        log_message("File sent from cache");
+        return;
+    }
+
     HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) {
         send_404(client_socket);
@@ -58,19 +73,22 @@ void send_file(SOCKET client_socket, const wchar_t *path) {
     LARGE_INTEGER file_size;
     GetFileSizeEx(file, &file_size);
 
-    char buffer[BUFFER_SIZE];
-    snprintf(buffer, sizeof(buffer),
-             "HTTP/1.1 200 OK\r\n"
-             "Content-Length: %lld\r\n"
-             "Connection: close\r\n"
-             "\r\n", file_size.QuadPart);
-    send(client_socket, buffer, strlen(buffer), 0);
-
+    char *content = malloc(file_size.QuadPart);
     DWORD bytes_read;
-    while (ReadFile(file, buffer, sizeof(buffer), &bytes_read, NULL) && bytes_read > 0) {
-        send(client_socket, buffer, bytes_read, 0);
+    if (ReadFile(file, content, file_size.QuadPart, &bytes_read, NULL) && bytes_read > 0) {
+        char buffer[BUFFER_SIZE];
+        snprintf(buffer, sizeof(buffer),
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Length: %lld\r\n"
+                 "Connection: close\r\n"
+                 "\r\n", file_size.QuadPart);
+        send(client_socket, buffer, strlen(buffer), 0);
+        send(client_socket, content, bytes_read, 0);
+        add_to_cache(path, content, bytes_read);
+    } else {
+        send_404(client_socket);
     }
-
+    free(content);
     CloseHandle(file);
     log_message("File sent successfully");
 }
@@ -122,6 +140,7 @@ void handle_client(SOCKET client_socket) {
             if (wcslen(full_path) > 0 && full_path[wcslen(full_path) - 1] == L'/') {
                 wcscat(full_path, L"index.html");
             }
+            evict_expired_cache();
             send_file(client_socket, full_path);
         } else {
             send_404(client_socket);
@@ -218,7 +237,8 @@ int main() {
     }
 
     init_thread_pool();
-    log_message("Thread pool initialized");
+    init_cache();
+    log_message("Thread pool and cache initialized");
     log_message("Server listening");
 
     printf("Server listening on port %d\n", PORT);
@@ -243,6 +263,7 @@ int main() {
 
     closesocket(server_socket);
     WSACleanup();
+    cleanup_cache();
     DeleteCriticalSection(&pool_lock);
     fclose(log_file);
     return 0;
