@@ -19,6 +19,11 @@
 #define WEB_ROOT "."
 
 FILE *log_file;
+pthread_t thread_pool[THREAD_POOL_SIZE];
+pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t queue_cond = PTHREAD_COND_INITIALIZER;
+int client_queue[THREAD_POOL_SIZE];
+int queue_size = 0;
 
 void log_message(const char *message) {
     time_t now = time(NULL);
@@ -54,6 +59,7 @@ void send_file(int client_socket, const char *path) {
         snprintf(buffer, sizeof(buffer),
                  "HTTP/1.1 200 OK\r\n"
                  "Content-Length: %zu\r\n"
+                 "Cache-Control: max-age=3600\r\n"  // 设置缓存指令
                  "Connection: close\r\n"
                  "\r\n", cached_entry->size);
         send(client_socket, buffer, strlen(buffer), 0);
@@ -78,6 +84,7 @@ void send_file(int client_socket, const char *path) {
         snprintf(buffer, sizeof(buffer),
                  "HTTP/1.1 200 OK\r\n"
                  "Content-Length: %zu\r\n"
+                 "Cache-Control: max-age=3600\r\n"  // 设置缓存指令
                  "Connection: close\r\n"
                  "\r\n", file_size);
         send(client_socket, buffer, strlen(buffer), 0);
@@ -147,14 +154,17 @@ void handle_client(int client_socket) {
     log_message("Client socket closed");
 }
 
-typedef struct {
-    int client_socket;
-} client_data_t;
-
 void* worker_thread(void *arg) {
-    client_data_t *data = (client_data_t *)arg;
-    handle_client(data->client_socket);
-    free(data);
+    while (1) {
+        pthread_mutex_lock(&queue_lock);
+        while (queue_size == 0) {
+            pthread_cond_wait(&queue_cond, &queue_lock);
+        }
+        int client_socket = client_queue[--queue_size];
+        pthread_mutex_unlock(&queue_lock);
+
+        handle_client(client_socket);
+    }
     return NULL;
 }
 
@@ -192,6 +202,10 @@ int main() {
     printf("Server listening on port %d\n", PORT);
     log_message("Server started");
 
+    for (int i = 0; i < THREAD_POOL_SIZE; i++) {
+        pthread_create(&thread_pool[i], NULL, worker_thread, NULL);
+    }
+
     while (1) {
         struct sockaddr_in client_addr;
         socklen_t client_addr_len = sizeof(client_addr);
@@ -201,11 +215,10 @@ int main() {
             continue;
         }
 
-        client_data_t *data = (client_data_t *)malloc(sizeof(client_data_t));
-        data->client_socket = client_socket;
-        pthread_t thread;
-        pthread_create(&thread, NULL, worker_thread, data);
-        pthread_detach(thread);
+        pthread_mutex_lock(&queue_lock);
+        client_queue[queue_size++] = client_socket;
+        pthread_cond_signal(&queue_cond);
+        pthread_mutex_unlock(&queue_lock);
     }
 
     cleanup_cache();
