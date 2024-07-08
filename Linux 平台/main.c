@@ -13,7 +13,8 @@
 #include <ctype.h>
 #include <stdio.h>
 
-#define THREAD_POOL_SIZE 10
+#define THREAD_POOL_SIZE 50  // 增加线程池大小
+#define MAX_QUEUE_SIZE 500  // 增加最大队列大小
 #define PORT 8080
 #define BUFFER_SIZE 4096
 #define WEB_ROOT "."
@@ -22,7 +23,7 @@ FILE *log_file;
 pthread_t thread_pool[THREAD_POOL_SIZE];
 pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t queue_cond = PTHREAD_COND_INITIALIZER;
-int client_queue[THREAD_POOL_SIZE];
+int client_queue[MAX_QUEUE_SIZE];
 int queue_size = 0;
 
 void log_message(const char *message) {
@@ -52,16 +53,16 @@ void removeQueryString(char *filePath) {
     }
 }
 
-void send_file(int client_socket, const char *path) {
+void send_file(int client_socket, const char *path, int keep_alive) {
     cache_entry_t *cached_entry = find_in_cache(path);
     if (cached_entry != NULL) {
         char buffer[BUFFER_SIZE];
         snprintf(buffer, sizeof(buffer),
                  "HTTP/1.1 200 OK\r\n"
                  "Content-Length: %zu\r\n"
-                 "Cache-Control: max-age=3600\r\n"  // 设置缓存指令
-                 "Connection: close\r\n"
-                 "\r\n", cached_entry->size);
+                 "Cache-Control: max-age=3600\r\n"
+                 "Connection: %s\r\n"
+                 "\r\n", cached_entry->size, keep_alive ? "keep-alive" : "close");
         send(client_socket, buffer, strlen(buffer), 0);
         send(client_socket, cached_entry->content, cached_entry->size, 0);
         log_message("File sent from cache");
@@ -79,14 +80,22 @@ void send_file(int client_socket, const char *path) {
     size_t file_size = file_stat.st_size;
 
     char *content = malloc(file_size);
+
+    if (content == NULL) {
+        close(file);
+        send_404(client_socket);
+        log_message("Memory allocation failed");
+        return;
+    }
+
     if (read(file, content, file_size) > 0) {
         char buffer[BUFFER_SIZE];
         snprintf(buffer, sizeof(buffer),
                  "HTTP/1.1 200 OK\r\n"
                  "Content-Length: %zu\r\n"
-                 "Cache-Control: max-age=3600\r\n"  // 设置缓存指令
-                 "Connection: close\r\n"
-                 "\r\n", file_size);
+                 "Cache-Control: max-age=3600\r\n"
+                 "Connection: %s\r\n"
+                 "\r\n", file_size, keep_alive ? "keep-alive" : "close");
         send(client_socket, buffer, strlen(buffer), 0);
         send(client_socket, content, file_size, 0);
         add_to_cache(path, content, file_size);
@@ -124,18 +133,31 @@ void url_decode(char *dst, const char *src) {
 
 void handle_client(int client_socket) {
     char buffer[BUFFER_SIZE];
-    int read_size = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
-    if (read_size > 0) {
+    int keep_alive = 0;
+
+    while (1) {
+        int read_size = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
+        if (read_size <= 0) {
+            break;
+        }
+
         buffer[read_size] = '\0';
         printf("Received request:\n%s\n", buffer);
         log_message("Received request");
 
         char method[16], encoded_path[256];
-        sscanf(buffer, "%s %s", method, encoded_path);
+        //限制 sscanf 函数从 buffer 中读取的字符串长度，确保不会超过 method 和 encoded_path 数组的大小，避免潜在的缓冲区溢出问题。
+        sscanf(buffer, "%15s %255s", method, encoded_path);
 
         char decoded_path[256];
         url_decode(decoded_path, encoded_path);
         removeQueryString(decoded_path);
+
+        if (strstr(buffer, "Connection: keep-alive")) {
+            keep_alive = 1;
+        } else {
+            keep_alive = 0;
+        }
 
         if (strcmp(method, "GET") == 0) {
             char full_path[512];
@@ -144,9 +166,13 @@ void handle_client(int client_socket) {
                 strcat(full_path, "index.html");
             }
             evict_expired_cache();
-            send_file(client_socket, full_path);
+            send_file(client_socket, full_path, keep_alive);
         } else {
             send_404(client_socket);
+        }
+
+        if (!keep_alive) {
+            break;
         }
     }
 
@@ -216,8 +242,13 @@ int main() {
         }
 
         pthread_mutex_lock(&queue_lock);
-        client_queue[queue_size++] = client_socket;
-        pthread_cond_signal(&queue_cond);
+        if (queue_size < MAX_QUEUE_SIZE) {
+            client_queue[queue_size++] = client_socket;
+            pthread_cond_signal(&queue_cond);
+        } else {
+            close(client_socket);  // 队列已满，拒绝新连接
+            log_message("Queue full, rejected new connection");
+        }
         pthread_mutex_unlock(&queue_lock);
     }
 
