@@ -13,7 +13,8 @@
 #include <stdio.h>
 
 #define BUFFER_SIZE 4096
-#define WEB_ROOT "."
+#define DEFAULT_WEB_ROOT "."
+char *web_root = DEFAULT_WEB_ROOT;
 
 void send_404(int client_socket) {
     const char *response =
@@ -139,7 +140,7 @@ void handle_request(int client_socket) {
 
         if (strcmp(method, "GET") == 0) {
             char full_path[512];
-            snprintf(full_path, sizeof(full_path), "%s%s", WEB_ROOT, decoded_path);
+            snprintf(full_path, sizeof(full_path), "%s%s", web_root, decoded_path);
             if (strlen(full_path) > 0 && full_path[strlen(full_path) - 1] == '/') {
                 strncat(full_path, "index.html", sizeof(full_path) - strlen(full_path) - 1);
             }
