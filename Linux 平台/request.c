@@ -162,5 +162,9 @@ void handle_request(int client_socket) {
     }
 
     close(client_socket);
+    pthread_mutex_lock(&connection_lock);
+    connection_count--;
+    pthread_cond_signal(&connection_cond);
+    pthread_mutex_unlock(&connection_lock);
     log_message(INFO, "Client socket closed");
 }

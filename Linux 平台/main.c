@@ -1,10 +1,9 @@
-// main.c
 #include "log.h"
 #include "request.h"
 #include "cache.h"
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h> 
+#include <errno.h>
 #include <time.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -17,9 +16,10 @@
 #include <stdio.h>
 #include <getopt.h>
 
-#define DEFAULT_THREAD_POOL_SIZE 50  // 增加线程池大小
-#define DEFAULT_MAX_QUEUE_SIZE 500  // 增加最大队列大小
+#define DEFAULT_THREAD_POOL_SIZE 10
+#define DEFAULT_MAX_QUEUE_SIZE 500
 #define DEFAULT_PORT 8080
+// #define DEFAULT_MAX_CONNECTION_SIZE 510
 
 int port = DEFAULT_PORT,
     thread_pool_size = DEFAULT_THREAD_POOL_SIZE,
@@ -28,8 +28,11 @@ int port = DEFAULT_PORT,
 pthread_t *thread_pool;
 pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t queue_cond = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t connection_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t connection_cond = PTHREAD_COND_INITIALIZER;
 int *client_queue;
 int queue_size = 0;
+int connection_count = 0;
 
 void* worker_thread(void *arg) {
     while (1) {
@@ -60,17 +63,22 @@ int main(int argc, char *argv[]) {
     thread_pool = (pthread_t *)malloc(DEFAULT_THREAD_POOL_SIZE * sizeof(pthread_t));
     client_queue = (int *)malloc(DEFAULT_MAX_QUEUE_SIZE * sizeof(int));
 
+    if (thread_pool == NULL || client_queue == NULL) {
+        log_message(ERROR, "Memory allocation failed");
+        return 1;
+    }
+
     static struct option long_options[] = {
         {"port", required_argument, 0, 'p'},
         {"threads", required_argument, 0, 't'},
         {"queues", required_argument, 0, 'q'},
-        {"wetroot", required_argument, 0, 'w'},
+        {"webroot", required_argument, 0, 'w'},
         {0, 0, 0, 0}
     };
 
     int opt;
     int option_index = 0;
-    while ((opt = getopt_long(argc, argv, "p:w:", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:t:q:w:", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'p':
                 port = atoi(optarg);
@@ -78,11 +86,21 @@ int main(int argc, char *argv[]) {
             case 't':
                 thread_pool_size = atoi(optarg);
                 pthread_t *temp0 = (pthread_t *)realloc(thread_pool, thread_pool_size * sizeof(pthread_t));
+                if (temp0 == NULL) {
+                    free(thread_pool);
+                    log_message(ERROR, "Memory allocation for thread_pool failed");
+                    return 1;
+                }
                 thread_pool = temp0;
                 break;
             case 'q':
                 max_queue_size = atoi(optarg);
                 int *temp1 = (int *)realloc(client_queue, max_queue_size * sizeof(int));
+                if (temp1 == NULL) {
+                    free(client_queue);
+                    log_message(ERROR, "Memory allocation for client_queue failed");
+                    return 1;
+                }
                 client_queue = temp1;
                 break;
             case 'w':
@@ -101,39 +119,52 @@ int main(int argc, char *argv[]) {
             port = atoi(argv[optind]);
             thread_pool_size = atoi(argv[optind + 1]);
             pthread_t *temp = (pthread_t *)realloc(thread_pool, thread_pool_size * sizeof(pthread_t));
+            if (temp == NULL) {
+                free(thread_pool);
+                log_message(ERROR, "Memory allocation for thread_pool failed");
+                return 1;
+            }
             thread_pool = temp;
         } else if (argc - optind == 3) {
             port = atoi(argv[optind]);
             thread_pool_size = atoi(argv[optind + 1]);
             pthread_t *temp0 = (pthread_t *)realloc(thread_pool, thread_pool_size * sizeof(pthread_t));
+            if (temp0 == NULL) {
+                free(thread_pool);
+                log_message(ERROR, "Memory allocation for thread_pool failed");
+                return 1;
+            }
             thread_pool = temp0;
-            max_queue_size = atoi(optarg);
+            max_queue_size = atoi(argv[optind + 2]);
             int *temp1 = (int *)realloc(client_queue, max_queue_size * sizeof(int));
+            if (temp1 == NULL) {
+                free(client_queue);
+                log_message(ERROR, "Memory allocation for client_queue failed");
+                return 1;
+            }
             client_queue = temp1;
         } else if (argc - optind == 4) {
             port = atoi(argv[optind]);
             thread_pool_size = atoi(argv[optind + 1]);
             pthread_t *temp0 = (pthread_t *)realloc(thread_pool, thread_pool_size * sizeof(pthread_t));
+            if (temp0 == NULL) {
+                free(thread_pool);
+                log_message(ERROR, "Memory allocation for thread_pool failed");
+                return 1;
+            }
             thread_pool = temp0;
-            max_queue_size = atoi(optarg);
+            max_queue_size = atoi(argv[optind + 2]);
             int *temp1 = (int *)realloc(client_queue, max_queue_size * sizeof(int));
+            if (temp1 == NULL) {
+                free(client_queue);
+                log_message(ERROR, "Memory allocation for client_queue failed");
+                return 1;
+            }
             client_queue = temp1;
-            strcpy(web_root, optarg);
-            web_root = optarg;
+            web_root = argv[optind + 3];
         } else {
             print_usage(argv[0]);
         }
-    }
-
-    // 检查内存分配是否成功
-    if (thread_pool == NULL) {
-        log_message(ERROR, "Memory allocation for thread_pool failed");
-        return 1;
-    }
-
-    if (client_queue == NULL) {
-        log_message(ERROR, "Memory allocation for client_queue failed");
-        return 1;
     }
 
     init_log();
@@ -180,11 +211,22 @@ int main(int argc, char *argv[]) {
     while (1) {
         struct sockaddr_in client_addr;
         socklen_t client_addr_len = sizeof(client_addr);
+
+        pthread_mutex_lock(&connection_lock);
+        while (connection_count >= max_queue_size) {
+            pthread_cond_wait(&connection_cond, &connection_lock);
+        }
+        pthread_mutex_unlock(&connection_lock);
+
         int client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_addr_len);
         if (client_socket < 0) {
             log_message(ERROR, "Accept failed: %s", strerror(errno));
             continue;
         }
+
+        pthread_mutex_lock(&connection_lock);
+        connection_count++;
+        pthread_mutex_unlock(&connection_lock);
 
         // 获取客户端IP地址并记录日志
         char client_ip[INET_ADDRSTRLEN];
@@ -193,8 +235,8 @@ int main(int argc, char *argv[]) {
 
         pthread_mutex_lock(&queue_lock);
         if (queue_size < max_queue_size) {
-            client_queue[queue_size++] = client_socket;
-            pthread_cond_signal(&queue_cond);
+        client_queue[queue_size++] = client_socket;
+        pthread_cond_signal(&queue_cond);
         } else {
             close(client_socket);  // 队列已满，拒绝新连接
             log_message(WARN, "Queue full, rejected new connection from %s", client_ip);
