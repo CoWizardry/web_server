@@ -4,6 +4,7 @@
 #include "cache.h"
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h> 
 #include <time.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -126,12 +127,12 @@ int main(int argc, char *argv[]) {
 
     // 检查内存分配是否成功
     if (thread_pool == NULL) {
-        fprintf(stderr, "Error: Memory of thread_pool allocation failed\n");
+        log_message(ERROR, "Memory allocation for thread_pool failed");
         return 1;
     }
 
     if (client_queue == NULL) {
-        fprintf(stderr, "Error: Memory of client_queue allocation failed\n");
+        log_message(ERROR, "Memory allocation for client_queue failed");
         return 1;
     }
 
@@ -140,13 +141,13 @@ int main(int argc, char *argv[]) {
 
     int server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket == -1) {
-        perror("Could not create socket");
+        log_message(ERROR, "Could not create socket: %s", strerror(errno));
         return 1;
     }
 
     int opt_ = 1;
     if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt_, sizeof(opt_)) < 0) {
-        perror("setsockopt(SO_REUSEADDR) failed");
+        log_message(ERROR, "setsockopt(SO_REUSEADDR) failed: %s", strerror(errno));
         return 1;
     }
 
@@ -156,22 +157,24 @@ int main(int argc, char *argv[]) {
     server_addr.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        perror("Bind failed");
+        log_message(ERROR, "Bind failed: %s", strerror(errno));
         return 1;
     }
 
     if (listen(server_socket, thread_pool_size) < 0) {
-        perror("Listen failed");
+        log_message(ERROR, "Listen failed: %s", strerror(errno));
         return 1;
     }
 
     printf("Server listening on port %d\n", port);
-    char log_msg[128];
-    snprintf(log_msg, sizeof(log_msg), "Server started on port %d\n", port);
-    log_message(log_msg);
-    
+    log_message(INFO, "Server started on port %d", port);
+
     for (int i = 0; i < thread_pool_size; i++) {
-        pthread_create(&thread_pool[i], NULL, worker_thread, NULL);
+        if (pthread_create(&thread_pool[i], NULL, worker_thread, NULL) != 0) {
+            log_message(ERROR, "Failed to create thread %d: %s", i, strerror(errno));
+        } else {
+            log_message(INFO, "Thread %d created successfully", i);
+        }
     }
 
     while (1) {
@@ -179,16 +182,14 @@ int main(int argc, char *argv[]) {
         socklen_t client_addr_len = sizeof(client_addr);
         int client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_addr_len);
         if (client_socket < 0) {
-            perror("Accept failed");
+            log_message(ERROR, "Accept failed: %s", strerror(errno));
             continue;
         }
 
         // 获取客户端IP地址并记录日志
         char client_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
-        char log_buffer[256];
-        snprintf(log_buffer, sizeof(log_buffer), "New connection from %s", client_ip);
-        log_message(log_buffer);
+        log_message(INFO, "New connection from %s", client_ip);
 
         pthread_mutex_lock(&queue_lock);
         if (queue_size < max_queue_size) {
@@ -196,7 +197,7 @@ int main(int argc, char *argv[]) {
             pthread_cond_signal(&queue_cond);
         } else {
             close(client_socket);  // 队列已满，拒绝新连接
-            log_message("Queue full, rejected new connection");
+            log_message(WARN, "Queue full, rejected new connection from %s", client_ip);
         }
         pthread_mutex_unlock(&queue_lock);
     }

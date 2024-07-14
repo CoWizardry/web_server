@@ -24,7 +24,7 @@ void send_404(int client_socket) {
         "\r\n"
         "<html><body><h1>404 Not Found</h1></body></html>";
     send(client_socket, response, strlen(response), 0);
-    log_message("Sent 404 Not Found");
+    log_message(ERROR, "Sent 404 Not Found");
 }
 
 void removeQueryString(char *filePath) {
@@ -46,13 +46,14 @@ void send_file(int client_socket, const char *path, int keep_alive) {
                  "\r\n", cached_entry->size, keep_alive ? "keep-alive" : "close");
         send(client_socket, buffer, strlen(buffer), 0);
         send(client_socket, cached_entry->content, cached_entry->size, 0);
-        log_message("File sent from cache");
+        log_message(INFO, "File sent from cache: %s", path);
         return;
     }
 
     int file = open(path, O_RDONLY);
     if (file == -1) {
         send_404(client_socket);
+        log_message(ERROR, "File not found: %s", path);
         return;
     }
 
@@ -64,7 +65,7 @@ void send_file(int client_socket, const char *path, int keep_alive) {
     if (content == NULL) {
         close(file);
         send_404(client_socket);
-        log_message("Memory allocation failed");
+        log_message(ERROR, "Memory allocation failed for file: %s", path);
         return;
     }
 
@@ -79,12 +80,13 @@ void send_file(int client_socket, const char *path, int keep_alive) {
         send(client_socket, buffer, strlen(buffer), 0);
         send(client_socket, content, file_size, 0);
         add_to_cache(path, content, file_size);
+        log_message(INFO, "File sent successfully: %s", path);
     } else {
         send_404(client_socket);
+        log_message(ERROR, "Failed to read file: %s", path);
     }
     free(content);
     close(file);
-    log_message("File sent successfully");
 }
 
 void url_decode(char *dst, const char *src) {
@@ -118,12 +120,13 @@ void handle_request(int client_socket) {
     while (1) {
         int read_size = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
         if (read_size <= 0) {
+            log_message(WARN, "Failed to read request or connection closed by client");
             break;
         }
 
         buffer[read_size] = '\0';
         printf("Received request:\n%s\n", buffer);
-        log_message("Received request");
+        log_message(INFO, "Received request:\n%s", buffer);
 
         char method[16], encoded_path[256];
         sscanf(buffer, "%15s %255s", method, encoded_path);
@@ -131,6 +134,7 @@ void handle_request(int client_socket) {
         char decoded_path[256];
         url_decode(decoded_path, encoded_path);
         removeQueryString(decoded_path);
+        log_message(INFO, "Decoded path: %s", decoded_path);
 
         if (strstr(buffer, "Connection: keep-alive")) {
             keep_alive = 1;
@@ -144,10 +148,12 @@ void handle_request(int client_socket) {
             if (strlen(full_path) > 0 && full_path[strlen(full_path) - 1] == '/') {
                 strncat(full_path, "index.html", sizeof(full_path) - strlen(full_path) - 1);
             }
+            log_message(INFO, "Requested file path: %s", full_path);
             evict_expired_cache();
             send_file(client_socket, full_path, keep_alive);
         } else {
             send_404(client_socket);
+            log_message(WARN, "Unsupported request method: %s", method);
         }
 
         if (!keep_alive) {
@@ -156,5 +162,5 @@ void handle_request(int client_socket) {
     }
 
     close(client_socket);
-    log_message("Client socket closed");
+    log_message(INFO, "Client socket closed");
 }

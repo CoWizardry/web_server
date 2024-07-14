@@ -1,30 +1,86 @@
 #include "log.h"
 #include <stdio.h>
+#include <stdarg.h>
 #include <time.h>
 #include <pthread.h>
+#include <string.h>
 
-FILE *log_file;
-pthread_mutex_t log_lock;
+#define LOG_FILE_PREFIX "server"
+#define LOG_FILE_SUFFIX ".log"
+static FILE *logfile;
+static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
+static char current_log_file[256];
 
-void init_log() {
-    log_file = fopen("webserver.log", "a");
-    pthread_mutex_init(&log_lock, NULL);
+void open_log_file() {
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    char date[20];
+    strftime(date, sizeof(date), "%Y-%m-%d", tm_info);
+
+    snprintf(current_log_file, sizeof(current_log_file), "%s_%s%s", LOG_FILE_PREFIX, date, LOG_FILE_SUFFIX);
+
+    logfile = fopen(current_log_file, "a");
+    if (!logfile) {
+        perror("Failed to open log file");
+    }
 }
 
-void log_message(const char *message) {
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    pthread_mutex_lock(&log_lock);
-    fprintf(log_file, "[%04d-%02d-%02d %02d:%02d:%02d] %s\n",
-            t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
-            t->tm_hour, t->tm_min, t->tm_sec, message);
-    fflush(log_file);
-    pthread_mutex_unlock(&log_lock);
+void close_log_file() {
+    if (logfile) {
+        fclose(logfile);
+        logfile = NULL;
+    }
+}
+
+void init_log() {
+    open_log_file();
 }
 
 void close_log() {
+    close_log_file();
+}
+
+const char* get_log_level_string(LogLevel level) {
+    switch (level) {
+        case DEBUG: return "DEBUG";
+        case INFO: return "INFO";
+        case WARN: return "WARN";
+        case ERROR: return "ERROR";
+        case FATAL: return "FATAL";
+        default: return "UNKNOWN";
+    }
+}
+
+void log_message(LogLevel level, const char *format, ...) {
     pthread_mutex_lock(&log_lock);
-    fclose(log_file);
+
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    char date[20];
+    strftime(date, sizeof(date), "%Y-%m-%d", tm_info);
+
+    if (logfile && strcmp(current_log_file, date) != 0) {
+        close_log_file();
+        open_log_file();
+    }
+
+    if (!logfile) {
+        pthread_mutex_unlock(&log_lock);
+        return;
+    }
+
+    char time_str[20];
+    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
+
+    fprintf(logfile, "[%s] [%s] ", time_str, get_log_level_string(level));
+
+    va_list args;
+    va_start(args, format);
+    vfprintf(logfile, format, args);
+    va_end(args);
+
+    fprintf(logfile, "\n");
+    fflush(logfile);
+
     pthread_mutex_unlock(&log_lock);
-    pthread_mutex_destroy(&log_lock);
 }
